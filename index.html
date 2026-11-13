@@ -1,0 +1,169 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta name="robots" content="noindex">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Charm</title>
+<meta name="description" content="Charm: an environment for RPL, the stack language of HP calculators.">
+<style>
+  /* GPUI appends its own <canvas> to <body> and sizes it to the page. */
+  :root { color-scheme: light dark; --bg: #1e1f22; --fg: #c9ccd1; --muted: #8b8f96; --accent: #6ea8fe; }
+  @media (prefers-color-scheme: light) { :root { --bg: #ffffff; --fg: #1f2328; --muted: #656d76; --accent: #0969da; } }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--bg); }
+  #page {
+    position: fixed; inset: 0; display: grid; place-items: center; padding: 16px;
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--fg);
+    background: var(--bg); z-index: 1;
+  }
+  #page .box { max-width: 30rem; text-align: center; }
+  #page h1 { font-size: 20px; font-weight: 600; margin: 0 0 8px; }
+  #page p { margin: 0 0 8px; color: var(--muted); }
+  #page .bar { width: 200px; height: 3px; margin: 16px auto 0; border-radius: 2px; background: color-mix(in srgb, var(--muted) 30%, transparent); overflow: hidden; }
+  #page .bar::after { content: ""; display: block; width: 40%; height: 100%; background: var(--accent); animation: slide 1.2s ease-in-out infinite; }
+  /* Once the download's size is known: how much of it has arrived. */
+  #page .bar.known::after { width: var(--done, 0%); animation: none; transition: width .15s linear; }
+  #page .amount { margin: 8px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; min-height: 18px; }
+  #page.failed .bar, #page.failed .amount { display: none; }
+  #page button { margin-top: 12px; font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+  @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+  @media (prefers-reduced-motion: reduce) { #page .bar::after { animation: none; width: 100%; opacity: .5; } }
+</style>
+</head>
+<body>
+<div id="page" role="status" aria-live="polite">
+  <div class="box">
+    <h1>Charm</h1>
+    <p id="page-text">Loading…</p>
+    <div class="bar" id="page-bar" role="progressbar" aria-label="Loading Charm"></div>
+    <p class="amount" id="page-amount"></p>
+  </div>
+</div>
+<script type="module">
+  // The page's side of the browser build: a loading state while the module
+  // downloads and starts, a readable message if it can't, and the hooks the
+  // app calls (`platform/web.rs`): `shown` once its window is up, `failed`
+  // if it can't start.
+  const page = document.getElementById("page");
+  const text = document.getElementById("page-text");
+  let shown = false;
+  const fail = (message, detail) => {
+    if (shown) {
+      // The app was running: say so over it, without hiding what's there.
+      page.style.display = "";
+      page.style.background = "color-mix(in srgb, var(--bg) 92%, transparent)";
+    }
+    page.classList.add("failed");
+    page.setAttribute("role", "alert");
+    text.textContent = message;
+    if (detail) {
+      const p = document.createElement("p");
+      p.textContent = detail;
+      text.after(p);
+    }
+    if (!page.querySelector("button")) {
+      const reload = document.createElement("button");
+      reload.textContent = "Reload";
+      reload.onclick = () => location.reload();
+      page.querySelector(".box").append(reload);
+    }
+  };
+  window.charmPage = {
+    shown() {
+      shown = true;
+      page.style.display = "none";
+    },
+    failed(message) {
+      fail(message, "");
+    },
+  };
+  // A panic or trap in the module ends the app; whatever was saved is kept.
+  const crashed = (reason) => fail(
+    "Charm stopped working.",
+    "Your workspace is kept as it was last saved. " + (reason ? `(${reason})` : ""),
+  );
+  window.addEventListener("error", (e) => {
+    if (e.error instanceof WebAssembly.RuntimeError || /wasm|unreachable/i.test(String(e.message))) crashed(e.message);
+  });
+  window.addEventListener("unhandledrejection", (e) => {
+    if (e.reason instanceof WebAssembly.RuntimeError) crashed(String(e.reason));
+  });
+
+  // The module, counted as it arrives: the bar fills with the share of it
+  // received (of `expected` bytes as built; a server's compression makes
+  // the transfer smaller, never the module), then says it is starting.
+  const bar = document.getElementById("page-bar");
+  const amount = document.getElementById("page-amount");
+  const mb = (n) => (n / 1e6).toFixed(1);
+  const download = async (url, expected) => {
+    const response = await fetch(url);
+    if (!response.ok) throw new Error(`the module couldn’t be downloaded (${response.status})`);
+    if (!response.body || !expected) return response;
+    bar.classList.add("known");
+    bar.setAttribute("aria-valuemin", "0");
+    bar.setAttribute("aria-valuemax", "100");
+    let received = 0;
+    const show = () => {
+      const share = Math.min(100, (100 * received) / expected);
+      bar.style.setProperty("--done", `${share}%`);
+      bar.setAttribute("aria-valuenow", String(Math.round(share)));
+      amount.textContent = `${mb(received)} of ${mb(expected)} MB`;
+    };
+    show();
+    const reader = response.body.getReader();
+    const counted = new ReadableStream({
+      async pull(controller) {
+        const { done, value } = await reader.read();
+        if (done) {
+          text.textContent = "Starting…";
+          amount.textContent = "";
+          controller.close();
+          return;
+        }
+        received += value.byteLength;
+        show();
+        controller.enqueue(value);
+      },
+    });
+    return new Response(counted, { headers: { "Content-Type": "application/wasm" } });
+  };
+
+  const graphics = async () => {
+    if (navigator.gpu) {
+      try { if (await navigator.gpu.requestAdapter()) return true; } catch {}
+    }
+    try { return !!document.createElement("canvas").getContext("webgl2"); } catch { return false; }
+  };
+
+  if (typeof WebAssembly !== "object") {
+    fail("This browser can’t run Charm.", "Charm needs WebAssembly, which every current version of Chrome, Edge, Firefox and Safari has.");
+  } else if (!(await graphics())) {
+    fail("This browser can’t draw Charm.", "Charm draws with WebGPU or WebGL 2. Turn on hardware acceleration in the browser’s settings, or try another browser.");
+  } else {
+    try {
+      const started = performance.now();
+      // The build names the files after their contents (web/build.sh), so
+      // a server can let browsers keep them for good; and says how large
+      // the module is, so the download's progress can be shown.
+      const files = { js: "./charm-e7660417140d.js", wasm: "./charm_bg-57aa7edf4d21.wasm", bytes: 17080922 };
+      const module = await import(files.js);
+      await module.default({ module_or_path: await download(new URL(files.wasm, import.meta.url), files.bytes) });
+      window.charmPage.startMs = performance.now() - started;
+      // For automated tests only (`web/smoke.sh`): the app's state, read
+      // from the one canvas's app.
+      if (new URLSearchParams(location.search).has("automation")) {
+        window.charmAutomation = {
+          state: () => {
+            const json = module.charm_automation_state();
+            return json ? JSON.parse(json) : null;
+          },
+        };
+      }
+    } catch (e) {
+      console.error(e);
+      fail("Charm couldn’t start.", String(e && e.message || e));
+    }
+  }
+</script>
+</body>
+</html>
