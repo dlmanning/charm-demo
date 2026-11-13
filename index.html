@@ -26,6 +26,28 @@
   #page .amount { margin: 8px 0 0; font-size: 12px; font-variant-numeric: tabular-nums; min-height: 18px; }
   #page.failed .bar, #page.failed .amount { display: none; }
   #page button { margin-top: 12px; font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+  /* When Charm stops (a panic, a trap, the graphics lost): over the app,
+     which is dead or can't draw; and, on the next load, a note saying so. */
+  #stopped { position: fixed; inset: 0; z-index: 3; display: grid; place-items: center; padding: 16px;
+    background: color-mix(in srgb, var(--bg) 88%, transparent);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--fg); }
+  #stopped[hidden], #previous[hidden] { display: none; }
+  #stopped .box, #previous { background: var(--bg); border: 1px solid color-mix(in srgb, var(--muted) 45%, transparent);
+    border-radius: 10px; box-shadow: 0 8px 32px rgb(0 0 0 / .35); }
+  #stopped .box { max-width: 34rem; width: 100%; padding: 20px 22px; box-sizing: border-box; }
+  #stopped h1, #previous h2 { font-size: 16px; font-weight: 600; margin: 0 0 6px; }
+  #stopped p, #previous p { margin: 0 0 8px; color: var(--muted); }
+  #stopped pre { margin: 8px 0 0; padding: 8px 10px; max-height: 9rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere;
+    font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--fg); border-radius: 6px;
+    background: color-mix(in srgb, var(--muted) 14%, transparent); }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; margin-top: 14px; }
+  .actions button { font: inherit; padding: 4px 14px; border-radius: 6px; border: 1px solid var(--muted); background: transparent; color: var(--fg); cursor: pointer; }
+  .actions button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #previous { position: fixed; z-index: 2; right: 16px; top: 60px; max-width: min(26rem, calc(100vw - 32px)); padding: 14px 16px; box-sizing: border-box;
+    font: 13px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; color: var(--fg); }
+  #previous h2 { font-size: 14px; }
+  #previous .actions { margin-top: 10px; }
   @keyframes slide { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
   @media (prefers-reduced-motion: reduce) { #page .bar::after { animation: none; width: 100%; opacity: .5; } }
 </style>
@@ -37,6 +59,25 @@
     <p id="page-text">Loading…</p>
     <div class="bar" id="page-bar" role="progressbar" aria-label="Loading Charm"></div>
     <p class="amount" id="page-amount"></p>
+  </div>
+</div>
+<div id="stopped" role="alertdialog" aria-modal="true" aria-labelledby="stopped-title" aria-describedby="stopped-text" hidden>
+  <div class="box">
+    <h1 id="stopped-title">Charm stopped</h1>
+    <p id="stopped-text"></p>
+    <pre id="stopped-detail"></pre>
+    <div class="actions">
+      <button type="button" id="stopped-copy">Copy Report</button>
+      <button type="button" id="stopped-reload" class="primary">Reload</button>
+    </div>
+  </div>
+</div>
+<div id="previous" role="status" aria-labelledby="previous-title" hidden>
+  <h2 id="previous-title"></h2>
+  <p id="previous-text"></p>
+  <div class="actions">
+    <button type="button" id="previous-copy">Copy Report</button>
+    <button type="button" id="previous-dismiss" class="primary">Dismiss</button>
   </div>
 </div>
 <script type="module">
@@ -72,22 +113,177 @@
     shown() {
       shown = true;
       page.style.display = "none";
+      showPrevious();
     },
     failed(message) {
       fail(message, "");
     },
   };
-  // A panic or trap in the module ends the app; whatever was saved is kept.
-  const crashed = (reason) => fail(
-    "Charm stopped working.",
-    "Your workspace is kept as it was last saved. " + (reason ? `(${reason})` : ""),
-  );
+  // --- When Charm stops ----------------------------------------------------
+  //
+  // The app keeps a trail of what it was doing in this tab's sessionStorage
+  // (`charm-trail`, written by `platform/web.rs` as it goes). A panic writes
+  // a report to localStorage (`charm-crash`) and calls `crashed` below; a
+  // trap or running out of memory reaches `error` / `unhandledrejection`
+  // here; a page that stopped responding and was reloaded never said
+  // goodbye (`charm-closed`, set as a page goes). Each is said over the app
+  // when it happens, and once more on the next load, with a report to copy.
+  const KEYS = { trail: "charm-trail", closed: "charm-closed", crash: "charm-crash", long: "charm-long" };
+  const store = (kind) => { try { return window[kind]; } catch { return null; } };
+  const get = (kind, key) => { try { return store(kind)?.getItem(key) ?? null; } catch { return null; } };
+  const put = (kind, key, value) => { try { store(kind)?.setItem(key, value); } catch {} };
+  const drop = (kind, key) => { try { store(kind)?.removeItem(key); } catch {} };
+  const parse = (text) => { try { return JSON.parse(text); } catch { return text; } };
+  // The build names the files after their contents (web/build.sh), so a
+  // server can let browsers keep them for good; and says how large the
+  // module is, so the download's progress can be shown.
+  const files = { js: "./charm-4c2e5527d8f3.js", wasm: "./charm_bg-f26b2ef82758.wasm", bytes: 17096802 };
+  let wasm = null;
+  const memoryMB = () => { try { return Math.round(wasm.memory.buffer.byteLength / 1048576); } catch { return null; } };
+  // A report for a bug report: what happened, where, what the app was doing.
+  const report = (what) => JSON.stringify({
+    ...what,
+    page: location.pathname + location.search,
+    build: files.wasm,
+    browser: navigator.userAgent,
+    memoryMB: what.memoryMB ?? memoryMB(),
+    trail: what.trail ?? parse(get("sessionStorage", KEYS.trail)),
+    longTasks: parse(get("sessionStorage", KEYS.long) || "[]"),
+  }, null, 1);
+  const copy = async (text, button) => {
+    let done = false;
+    try { await navigator.clipboard.writeText(text); done = true; } catch {}
+    if (!done) {
+      // Without the clipboard API (an insecure page): the text, selected.
+      const area = document.createElement("textarea");
+      area.value = text; area.style.position = "fixed"; area.style.opacity = "0";
+      document.body.append(area); area.select();
+      try { done = document.execCommand("copy"); } catch {}
+      area.remove();
+    }
+    button.textContent = done ? "Copied" : "Couldn’t Copy";
+    setTimeout(() => (button.textContent = "Copy Report"), 2000);
+  };
+
+  // What the last page left: a report of a stop, or a trail without a
+  // goodbye (it stopped responding, or the browser ended it). Read before
+  // this page's app writes its own, and said once.
+  let previous = null;
+  {
+    const crash = get("localStorage", KEYS.crash);
+    const trail = get("sessionStorage", KEYS.trail);
+    if (crash) {
+      previous = { title: "Charm stopped the last time it ran", text: "The report says what went wrong and what Charm was doing.", report: crash };
+    } else if (trail && get("sessionStorage", KEYS.closed) !== "1") {
+      previous = {
+        title: "Charm didn’t close normally last time",
+        text: "The page may have stopped responding. The report says what Charm was doing.",
+        report: report({ kind: "the page didn’t close", trail: parse(trail) }),
+      };
+    }
+    drop("localStorage", KEYS.crash);
+    for (const key of [KEYS.trail, KEYS.closed, KEYS.long]) drop("sessionStorage", key);
+    addEventListener("pagehide", () => put("sessionStorage", KEYS.closed, "1"));
+    addEventListener("pageshow", (e) => { if (e.persisted) drop("sessionStorage", KEYS.closed); });
+  }
+  const showPrevious = () => {
+    if (!previous) return;
+    const box = document.getElementById("previous");
+    document.getElementById("previous-title").textContent = previous.title;
+    document.getElementById("previous-text").textContent = previous.text;
+    const text = previous.report;
+    document.getElementById("previous-copy").onclick = (e) => copy(text, e.currentTarget);
+    document.getElementById("previous-dismiss").onclick = () => (box.hidden = true);
+    box.hidden = false;
+  };
+
+  // Main-thread tasks of 200 ms or more, kept with the trail.
+  try {
+    new PerformanceObserver((list) => {
+      const long = parse(get("sessionStorage", KEYS.long) || "[]");
+      for (const e of list.getEntries()) if (e.duration >= 200) long.push([Math.round(e.startTime), Math.round(e.duration)]);
+      put("sessionStorage", KEYS.long, JSON.stringify(long.slice(-8)));
+    }).observe({ type: "longtask" });
+  } catch {}
+
+  let stopped = null;
+  const stop = (title, text, what, save = true) => {
+    if (stopped) return;
+    stopped = report(what);
+    if (save) put("localStorage", KEYS.crash, stopped);
+    page.style.display = "none";
+    document.getElementById("previous").hidden = true;
+    document.getElementById("stopped-title").textContent = title;
+    document.getElementById("stopped-text").textContent = text;
+    document.getElementById("stopped-detail").textContent = [what.message, what.location].filter(Boolean).join("\n");
+    document.getElementById("stopped-copy").onclick = (e) => copy(stopped, e.currentTarget);
+    document.getElementById("stopped-reload").onclick = () => location.reload();
+    const box = document.getElementById("stopped");
+    box.hidden = false;
+    document.getElementById("stopped-reload").focus();
+  };
+  // Whether everything was stored at the app's last mark, as far as known.
+  const saved = (trail) => (trail && typeof trail === "object" && trail.unstored === false);
+  const stoppedText = (trail) => saved(trail)
+    ? "Your work is saved in this browser, up to the last thing you did. Reload to go on."
+    : "Your work is saved in this browser up to the last save; a change made just before Charm stopped may not have been. Reload to go on.";
+
+  // A panic (`platform/web.rs`): its report is stored already.
+  window.charmPage.crashed = (json) => {
+    const what = parse(json);
+    stop("Charm stopped", stoppedText(what.trail), what, false);
+    put("localStorage", KEYS.crash, stopped);
+  };
+  // A trap with no panic before it: running out of memory, or a fault the
+  // app couldn't report.
+  const trapped = (error) => {
+    if (stopped) return;
+    const message = String(error && (error.message || error));
+    if (!shown) return fail("Charm couldn’t start.", message);
+    const mb = memoryMB();
+    const memory = mb !== null && mb >= 3500;
+    const trail = parse(get("sessionStorage", KEYS.trail));
+    stop(
+      "Charm stopped",
+      (memory ? "It ran out of memory. " : "") + stoppedText(trail),
+      { kind: memory ? "out of memory" : "trap", message: `${error?.name || "Error"}: ${message}`, location: (error?.stack || "").slice(0, 2000), trail },
+    );
+  };
   window.addEventListener("error", (e) => {
-    if (e.error instanceof WebAssembly.RuntimeError || /wasm|unreachable/i.test(String(e.message))) crashed(e.message);
+    if (e.error instanceof WebAssembly.RuntimeError || /wasm|unreachable/i.test(String(e.message))) trapped(e.error || e.message);
   });
   window.addEventListener("unhandledrejection", (e) => {
-    if (e.reason instanceof WebAssembly.RuntimeError) crashed(String(e.reason));
+    if (e.reason instanceof WebAssembly.RuntimeError) trapped(e.reason);
   });
+  // The graphics device lost (a GPU reset, the GPU process restarting): the
+  // app is alive and keeps saving, but can't draw again until a reload.
+  const graphicsLost = (why) => {
+    if (!shown) return;
+    stop(
+      "Charm can’t draw any more",
+      "The browser’s graphics stopped working. Reload the page to go on; Charm saves as you work, and the page asks first if something isn’t saved.",
+      { kind: "graphics lost", message: why },
+      false,
+    );
+  };
+  if (navigator.gpu?.requestAdapter) {
+    const requestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+    navigator.gpu.requestAdapter = async (...args) => {
+      const adapter = await requestAdapter(...args);
+      if (adapter?.requestDevice) {
+        const requestDevice = adapter.requestDevice.bind(adapter);
+        adapter.requestDevice = async (...more) => {
+          const device = await requestDevice(...more);
+          device?.lost?.then((info) => { if (info.reason !== "destroyed") graphicsLost(`WebGPU device lost: ${info.message || info.reason}`); });
+          return device;
+        };
+      }
+      return adapter;
+    };
+  }
+  document.addEventListener("webglcontextlost", () => graphicsLost("WebGL context lost"), true);
+  // For a bug report from the browser's console, whatever happened.
+  window.charmPage.report = () => stopped || previous?.report || report({ kind: "on request" });
 
   // The module, counted as it arrives: the bar fills with the share of it
   // received (of `expected` bytes as built; a server's compression makes
@@ -142,12 +338,8 @@
   } else {
     try {
       const started = performance.now();
-      // The build names the files after their contents (web/build.sh), so
-      // a server can let browsers keep them for good; and says how large
-      // the module is, so the download's progress can be shown.
-      const files = { js: "./charm-e7660417140d.js", wasm: "./charm_bg-57aa7edf4d21.wasm", bytes: 17080922 };
       const module = await import(files.js);
-      await module.default({ module_or_path: await download(new URL(files.wasm, import.meta.url), files.bytes) });
+      wasm = await module.default({ module_or_path: await download(new URL(files.wasm, import.meta.url), files.bytes) });
       window.charmPage.startMs = performance.now() - started;
       // For automated tests only (`web/smoke.sh`): the app's state, read
       // from the one canvas's app.
@@ -157,6 +349,9 @@
             const json = module.charm_automation_state();
             return json ? JSON.parse(json) : null;
           },
+          memory: () => wasm.memory.buffer.byteLength,
+          // The crash handling's test: a panic in the app.
+          crash: () => setTimeout(() => module.charm_automation_crash()),
         };
       }
     } catch (e) {
