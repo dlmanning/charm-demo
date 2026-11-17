@@ -1,8 +1,8 @@
 <!doctype html>
 <html lang="en">
 <head>
-    <meta name="robots" content="noindex">
 <meta charset="utf-8">
+<meta name="robots" content="noindex">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Charm</title>
 <meta name="description" content="Charm: an environment for RPL, the stack language of HP calculators.">
@@ -137,7 +137,7 @@
   // The build names the files after their contents (web/build.sh), so a
   // server can let browsers keep them for good; and says how large the
   // module is, so the download's progress can be shown.
-  const files = { js: "./charm-4c2e5527d8f3.js", wasm: "./charm_bg-f26b2ef82758.wasm", bytes: 17096802 };
+  const files = { js: "./charm-263083704c98.js", wasm: "./charm_bg-050bd6aae7f0.wasm", bytes: 17307918 };
   let wasm = null;
   const memoryMB = () => { try { return Math.round(wasm.memory.buffer.byteLength / 1048576); } catch { return null; } };
   // A report for a bug report: what happened, where, what the app was doing.
@@ -223,7 +223,8 @@
     document.getElementById("stopped-reload").focus();
   };
   // Whether everything was stored at the app's last mark, as far as known.
-  const saved = (trail) => (trail && typeof trail === "object" && trail.unstored === false);
+  // A draft waiting to be written (typing hadn't paused) is not.
+  const saved = (trail) => (trail && typeof trail === "object" && trail.unstored === false && trail.pending !== true);
   const stoppedText = (trail) => saved(trail)
     ? "Your work is saved in this browser, up to the last thing you did. Reload to go on."
     : "Your work is saved in this browser up to the last save; a change made just before Charm stopped may not have been. Reload to go on.";
